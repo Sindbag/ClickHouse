@@ -9,6 +9,9 @@
 #include <IO/CompressedReadBuffer.h>
 #include <IO/WriteHelpers.h>
 #include <IO/copyData.h>
+#include <Compression/CompressionPipeline.h>
+
+#include <Poco/String.h>
 
 
 namespace DB
@@ -30,22 +33,25 @@ void checkAndWriteHeader(DB::ReadBuffer & in, DB::WriteBuffer & out)
     {
         in.ignore(16);    /// checksum
 
-        char header[COMPRESSED_BLOCK_HEADER_SIZE];
-        in.readStrict(header, COMPRESSED_BLOCK_HEADER_SIZE);
-
-        UInt32 size_compressed = unalignedLoad<UInt32>(&header[1]);
+        auto pipe = DB::CompressionPipeline::createPipelineFromBuffer(&in);
+        UInt32 size_compressed = pipe->getCompressedSize();
 
         if (size_compressed > DBMS_MAX_COMPRESSED_SIZE)
             throw DB::Exception("Too large size_compressed. Most likely corrupted data.", DB::ErrorCodes::TOO_LARGE_SIZE_COMPRESSED);
 
-        UInt32 size_decompressed = unalignedLoad<UInt32>(&header[5]);
+        auto data_sizes = pipe->getDataSizes();
+        for (size_t i = 0; i < data_sizes.size(); ++i)
+        {
+            if (i) DB::writeChar('\t', out);
+            if (i != data_sizes.size() - 1)
+                DB::writeText(data_sizes[i], out);
+            else
+                DB::writeText(data_sizes[i] + pipe->getHeaderSize(), out);
 
-        DB::writeText(size_decompressed, out);
-        DB::writeChar('\t', out);
-        DB::writeText(size_compressed, out);
+        }
         DB::writeChar('\n', out);
 
-        in.ignore(size_compressed - COMPRESSED_BLOCK_HEADER_SIZE);
+        in.ignore(size_compressed);
     }
 }
 
@@ -63,6 +69,7 @@ int mainEntryClickHouseCompressor(int argc, char ** argv)
         ("zstd", "use ZSTD instead of LZ4")
         ("level", "compression level")
         ("none", "use no compression instead of LZ4")
+        ("custom", boost::program_options::value<DB::String>(), "custom compression pipeline")
         ("stat", "print block statistics of compressed data")
     ;
 
@@ -83,18 +90,23 @@ int mainEntryClickHouseCompressor(int argc, char ** argv)
         bool use_zstd = options.count("zstd");
         bool stat_mode = options.count("stat");
         bool use_none = options.count("none");
+        bool use_custom = options.count("custom");
         unsigned block_size = options["block-size"].as<unsigned>();
 
         DB::CompressionMethod method = DB::CompressionMethod::LZ4;
 
+        DB::CompressionPipelinePtr compression_pipe;
         if (use_lz4hc)
             method = DB::CompressionMethod::LZ4HC;
         else if (use_zstd)
             method = DB::CompressionMethod::ZSTD;
         else if (use_none)
             method = DB::CompressionMethod::NONE;
+        else if (use_custom)
+            compression_pipe = DB::CompressionPipeline::createPipelineFromString(options["custom"].as<DB::String>());
 
-        DB::CompressionSettings settings(method, options.count("level") > 0 ? options["level"].as<int>() : DB::CompressionSettings::getDefaultLevel(method));
+        DB::CompressionSettings settings(method, options.count("level") > 0 ? options["level"].as<int>() : DB::CompressionSettings::getDefaultLevel(method),
+                                         compression_pipe);
 
         DB::ReadBufferFromFileDescriptor rb(STDIN_FILENO);
         DB::WriteBufferFromFileDescriptor wb(STDOUT_FILENO);

@@ -85,6 +85,9 @@ using Dependencies = std::vector<DatabaseAndTableName>;
 using TableAndCreateAST = std::pair<StoragePtr, ASTPtr>;
 using TableAndCreateASTs = std::map<String, TableAndCreateAST>;
 
+/// Codecs - map from name to CompressionCodecPtr (pipeline)
+using ColumnCodecs = std::unordered_map<std::string, CompressionPipelinePtr>;
+
 /** A set of known objects that can be used in the query.
   * Consists of a shared part (always common to all sessions and queries)
   *  and copied part (which can be its own for each session or query).
@@ -366,6 +369,7 @@ public:
 
     /// Lets you select the compression settings according to the conditions described in the configuration file.
     CompressionSettings chooseCompressionSettings(size_t part_size, double part_size_ratio) const;
+    CompressionSettings chooseCompressionSettings(size_t part_size, double part_size_ratio, ColumnCodecs& codecs) const;
 
     /// Get the server uptime in seconds.
     time_t getUptimeSeconds() const;

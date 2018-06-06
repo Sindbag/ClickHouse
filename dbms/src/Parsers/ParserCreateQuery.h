@@ -6,9 +6,11 @@
 #include <Parsers/ASTNameTypePair.h>
 #include <Parsers/ASTColumnDeclaration.h>
 #include <Parsers/ASTIdentifier.h>
+#include <Parsers/ASTFunction.h>
 #include <Parsers/CommonParsers.h>
 #include <Common/typeid_cast.h>
 #include <Poco/String.h>
+#include <boost/algorithm/string.hpp>
 
 
 namespace DB
@@ -115,6 +117,7 @@ bool IParserColumnDeclaration<NameParser>::parseImpl(Pos & pos, ASTPtr & node, E
 {
     NameParser name_parser;
     ParserIdentifierWithOptionalParameters type_parser;
+    ParserCodec codec_parser;
     ParserKeyword s_default{"DEFAULT"};
     ParserKeyword s_materialized{"MATERIALIZED"};
     ParserKeyword s_alias{"ALIAS"};
@@ -138,6 +141,11 @@ bool IParserColumnDeclaration<NameParser>::parseImpl(Pos & pos, ASTPtr & node, E
     }
     else
         pos = fallback_pos;
+
+    ASTPtr codec;
+    const auto codec_fallback_pos = pos;
+    if (!codec_parser.parse(pos, codec, expected))
+        pos = codec_fallback_pos;
 
     /// parse {DEFAULT, MATERIALIZED, ALIAS}
     String default_specifier;
@@ -172,6 +180,12 @@ bool IParserColumnDeclaration<NameParser>::parseImpl(Pos & pos, ASTPtr & node, E
         column_declaration->children.push_back(std::move(default_expression));
     }
 
+    if (codec)
+    {
+        column_declaration->codec = codec;
+        column_declaration->children.push_back(std::move(codec));
+    }
+
     return true;
 }
 
@@ -179,6 +193,14 @@ class ParserColumnDeclarationList : public IParserBase
 {
 protected:
     const char * getName() const { return "column declaration list"; }
+    bool parseImpl(Pos & pos, ASTPtr & node, Expected & expected);
+};
+
+
+class ParserCodecDeclarationList : public IParserBase
+{
+protected:
+    const char * getName() const { return "codec declaration list"; }
     bool parseImpl(Pos & pos, ASTPtr & node, Expected & expected);
 };
 

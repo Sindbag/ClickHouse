@@ -7,6 +7,8 @@
 
 #include <Common/escapeForFileName.h>
 
+#include <Compression/CompressionPipeline.h>
+
 #include <IO/WriteBufferFromFile.h>
 #include <IO/WriteHelpers.h>
 
@@ -153,7 +155,7 @@ BlockIO InterpreterCreateQuery::createDatabase(ASTCreateQuery & create)
 }
 
 
-using ColumnsAndDefaults = std::pair<NamesAndTypesList, ColumnDefaults>;
+using ColumnsAndDefaults = std::pair<NamesAndTypesList, std::pair<ColumnDefaults, ColumnCodecs>>;
 
 /// AST to the list of columns with types. Columns of Nested type are expanded into a list of real columns.
 static ColumnsAndDefaults parseColumns(const ASTExpressionList & column_list_ast, const Context & context)
@@ -161,6 +163,7 @@ static ColumnsAndDefaults parseColumns(const ASTExpressionList & column_list_ast
     /// list of table columns in correct order
     NamesAndTypesList columns{};
     ColumnDefaults defaults{};
+    ColumnCodecs codecs{};
 
     /// Columns requiring type-deduction or default_expression type-check
     std::vector<std::pair<NameAndTypePair *, ASTColumnDeclaration *>> defaulted_columns{};
@@ -203,6 +206,13 @@ static ColumnsAndDefaults parseColumns(const ASTExpressionList & column_list_ast
             }
             else
                 default_expr_list->children.emplace_back(setAlias(col_decl.default_expression->clone(), col_decl.name));
+        }
+        /// parse codec definition and store pipe for column
+        if (col_decl.codec)
+        {
+            auto column_pipe = CompressionPipeline::createPipelineFromASTPtr(col_decl.codec);
+            column_pipe->setDataType(columns.back().type);
+            codecs.emplace(col_decl.name, column_pipe);
         }
     }
 
@@ -249,14 +259,14 @@ static ColumnsAndDefaults parseColumns(const ASTExpressionList & column_list_ast
         }
     }
 
-    return {Nested::flatten(columns), defaults};
+    return {Nested::flatten(columns), {defaults, codecs}};
 }
 
 
 static NamesAndTypesList removeAndReturnColumns(ColumnsAndDefaults & columns_and_defaults, const ColumnDefaultKind kind)
 {
     auto & columns = columns_and_defaults.first;
-    auto & defaults = columns_and_defaults.second;
+    auto & defaults = columns_and_defaults.second.first;
 
     NamesAndTypesList removed{};
 
@@ -324,6 +334,12 @@ ASTPtr InterpreterCreateQuery::formatColumns(const ColumnsDescription & columns)
             column_declaration->default_expression = it->second.expression->clone();
         }
 
+        const auto ct = columns.codecs.find(column.name);
+        if (ct != std::end(columns.codecs))
+        {
+            column_declaration->codec = ct->second->codec_ptr->clone();
+        }
+
         columns_list->children.push_back(column_declaration_ptr);
     }
 
@@ -339,7 +355,8 @@ ColumnsDescription InterpreterCreateQuery::getColumnsDescription(const ASTExpres
     res.materialized = removeAndReturnColumns(columns_and_defaults, ColumnDefaultKind::Materialized);
     res.aliases = removeAndReturnColumns(columns_and_defaults, ColumnDefaultKind::Alias);
     res.ordinary = std::move(columns_and_defaults.first);
-    res.defaults = std::move(columns_and_defaults.second);
+    res.defaults = std::move(columns_and_defaults.second.first);
+    res.codecs = std::move(columns_and_defaults.second.second);
 
     if (res.ordinary.size() + res.materialized.size() == 0)
         throw Exception{"Cannot CREATE table without physical columns", ErrorCodes::EMPTY_LIST_OF_COLUMNS_PASSED};
